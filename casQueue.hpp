@@ -1,50 +1,64 @@
 #include <atomic>
 #include <memory>
 
-template<typename T>
+template <typename T>
 class CASQueue {
-private:
+public:
     struct Node {
-        std::shared_ptr<T> data;
-        Node* next;
-        Node() : next(nullptr) {}
+        T data;
+        std::shared_ptr<Node> next;
+
+        Node(const T& data_) : data(data_) {}
     };
 
-    std::atomic<Node*> head;
-    std::atomic<Node*> tail;
-
-public:
-    CASQueue() : head(new Node), tail(head.load()) {}
-
-    CASQueue(const CASQueue& other) = delete;
-    CASQueue& operator=(const CASQueue& other) = delete;
-
-    ~CASQueue() {
-        while (Node* old_head = head.load()) {
-            head.store(old_head->next);
-            delete old_head;
-        }
+    CASQueue() {
+        std::shared_ptr<Node> dummy_node(new Node(T()));
+        tail = head = dummy_node;
     }
 
-    std::shared_ptr<T> try_pop() {
-        Node* old_head = head.load();
-        while (old_head != tail.load()) {
-            if (head.compare_exchange_strong(old_head, old_head->next)) {
-                std::shared_ptr<T> res(old_head->data);
-                delete old_head;
-                return res;
+    void push(const T& value) {
+        std::shared_ptr<Node> new_node(new Node(value));
+        std::shared_ptr<Node> old_tail = tail.load();
+        while (true) {
+            std::shared_ptr<Node> old_next = old_tail->next;
+            if (old_tail == tail.load()) {
+                if (old_next == nullptr) {
+                    if (std::atomic_compare_exchange_strong(
+                            &(old_tail->next), nullptr, new_node)) {
+                        break;
+                    }
+                } else {
+                    tail.compare_exchange_strong(old_tail, old_next);
+                }
             }
-            old_head = head.load();
+            old_tail = tail.load();
         }
-        return std::shared_ptr<T>();
+        tail.compare_exchange_strong(old_tail, new_node);
     }
 
-    void push(T new_value) {
-        std::shared_ptr<T> new_data(std::make_shared<T>(std::move(new_value)));
-        Node* p = new Node;
-        Node* old_tail = tail.load();
-        old_tail->data.swap(new_data);
-        old_tail->next = p;
-        tail.compare_exchange_strong(old_tail, p);
+    std::shared_ptr<T> pop() {
+        std::shared_ptr<Node> old_head = head.load();
+        while (true) {
+            std::shared_ptr<Node> old_tail = tail.load();
+            std::shared_ptr<Node> old_next = old_head->next;
+            if (old_head == head.load()) {
+                if (old_head == old_tail) {
+                    if (old_next == nullptr) {
+                        return nullptr;
+                    }
+                    tail.compare_exchange_strong(old_tail, old_next);
+                } else {
+                    std::shared_ptr<T> result(
+                        std::make_shared<T>(old_next->data));
+                    if (head.compare_exchange_strong(old_head, old_next)) {
+                        return result;
+                    }
+                }
+            }
+        }
     }
+
+private:
+    std::atomic<std::shared_ptr<Node>> head;
+    std::atomic<std::shared_ptr<Node>> tail;
 };
