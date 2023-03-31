@@ -5,56 +5,72 @@ template<typename T>
 class CASQueue {
 private:
     struct Node {
-        std::atomic<Node*> next;
         std::shared_ptr<T> data;
+        std::atomic<Node*> next;
 
-        Node(): next(nullptr) {}
+        Node(T const& data_): data(std::make_shared<T>(data_)) {}
     };
 
     std::atomic<Node*> head;
     std::atomic<Node*> tail;
 
 public:
-    CASQueue(): head(new Node), tail(head.load()) {}
+    CASQueue() {
+        Node* node = new Node(T{});
+        head.store(node);
+        tail.store(node);
+    }
 
-    void enqueue(T new_value) {
-        auto new_node = std::make_shared<Node>();
-        new_node->data = std::make_shared<T>(new_value);
+    CASQueue(const CASQueue& other) = delete;
+    CASQueue& operator=(const CASQueue& other) = delete;
 
-        Node* last = nullptr;
-        while (true) {
-            last = tail.load();
-            Node* next = last->next.load(std::memory_order_acquire);
-
-            if (last == tail.load(std::memory_order_relaxed)) {
-                if (next == nullptr) {
-                    if (last->next.compare_exchange_strong(next, new_node.get())) {
-                        break;
-                    }
-                } else {
-                    tail.compare_exchange_strong(last, next);
-                }
-            }
+    ~CASQueue() {
+        while (head != nullptr) {
+            Node* tmp = head;
+            head = head->next;
+            delete tmp;
         }
-        tail.compare_exchange_strong(last, new_node.get(), std::memory_order_release);
+    }
+
+    void enqueue(T const& value) {
+        Node* new_node = new Node(value);
+        Node* last = tail.load();
+        Node* next = nullptr;
+
+        while (true) {
+            next = last->next.load();
+            if (next == nullptr) {
+                if (last->next.compare_exchange_weak(next, new_node)) {
+                    break;
+                }
+            } else {
+                tail.compare_exchange_weak(last, next);
+            }
+            last = tail.load();
+        }
+        tail.compare_exchange_weak(last, new_node);
     }
 
     std::shared_ptr<T> dequeue() {
         Node* first = nullptr;
-        while (true) {
-            first = head.load(std::memory_order_acquire);
-            Node* last = tail.load(std::memory_order_acquire);
-            Node* next = first->next.load(std::memory_order_acquire);
+        Node* last = nullptr;
+        Node* next = nullptr;
 
-            if (first == head.load(std::memory_order_relaxed)) {
+        while (true) {
+            first = head.load();
+            last = tail.load();
+            next = first->next.load();
+
+            if (first == head.load()) {
                 if (first == last) {
                     if (next == nullptr) {
-                        return std::shared_ptr<T>();
+                        return nullptr;
                     }
-                    tail.compare_exchange_strong(last, next, std::memory_order_release);
+                    tail.compare_exchange_weak(last, next);
                 } else {
-                    std::shared_ptr<T> res = next->data;
-                    if (head.compare_exchange_strong(first, next, std::memory_order_release)) {
+                    if (head.compare_exchange_weak(first, next)) {
+                        std::shared_ptr<T> res = next->data;
+                        delete first;
                         return res;
                     }
                 }
