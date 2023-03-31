@@ -1,70 +1,51 @@
 #include <atomic>
-#include <cstddef>
+#include <memory>
 
 template<typename T>
-class CASQueue {
+class LockFreeQueue {
 private:
     struct Node {
-        T data;
-        std::atomic<Node*> next;
+        std::shared_ptr<T> data;
+        Node* next;
 
-        Node(const T& data) : data(data), next(nullptr) {}
+        Node() : next(nullptr) {}
     };
 
     std::atomic<Node*> head;
     std::atomic<Node*> tail;
 
 public:
-    CASQueue() : head(new Node(T())), tail(head.load()) {}
-    ~CASQueue() {
-        while (head) {
-            Node* tmp = head;
-            head = tmp->next;
-            delete tmp;
+    LockFreeQueue() : head(new Node), tail(head.load()) {}
+
+    LockFreeQueue(const LockFreeQueue& other) = delete;
+    LockFreeQueue& operator=(const LockFreeQueue& other) = delete;
+
+    ~LockFreeQueue() {
+        while (Node* const old_head = head.load()) {
+            head.store(old_head->next);
+            delete old_head;
         }
     }
 
-    bool enqueue(const T& data) {
-        Node* newNode = new Node(data);
-        while (true) {
-            Node* curTail = tail.load();
-            Node* curNext = curTail->next.load();
-            if (curTail != tail.load()) {
-                continue;
-            }
-            if (curNext == nullptr) {
-                if (std::atomic_compare_exchange_strong(&curTail->next, &curNext, newNode)) {
-                    break;
-                }
-            } else {
-                std::atomic_compare_exchange_strong(&tail, &curTail, curNext);
-            }
-        }
-        std::atomic_compare_exchange_strong(&tail, &curTail, newNode);
-        return true;
+    void push(T value) {
+        std::shared_ptr<T> new_data(std::make_shared<T>(std::move(value)));
+        Node* new_node = new Node;
+        Node* tail_ptr = tail.load();
+        tail_ptr->data = new_data;
+        tail_ptr->next = new_node;
+        tail.store(new_node);
     }
 
-    bool dequeue(T& data) {
-        while (true) {
-            Node* curHead = head.load();
-            Node* curTail = tail.load();
-            Node* curNext = curHead->next.load();
-            if (curHead != head.load()) {
-                continue;
+    std::shared_ptr<T> pop() {
+        Node* old_head = head.load();
+        while (old_head != tail.load()) {
+            if (head.compare_exchange_strong(old_head, old_head->next)) {
+                std::shared_ptr<T> const res(old_head->data);
+                delete old_head;
+                return res;
             }
-            if (curHead == curTail) {
-                if (curNext == nullptr) {
-                    return false;
-                }
-                std::atomic_compare_exchange_strong(&tail, &curTail, curNext);
-            } else {
-                data = curNext->data;
-                if (std::atomic_compare_exchange_strong(&head, &curHead, curNext)) {
-                    break;
-                }
-            }
+            old_head = head.load();
         }
-        delete curHead;
-        return true;
+        return std::shared_ptr<T>();
     }
 };
